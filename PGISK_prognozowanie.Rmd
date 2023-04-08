@@ -1,0 +1,338 @@
+---
+title: "<center>Prognozowanie wartości szeregu czasowego</center>"
+output: 
+    html_document:
+          code_folding: hide
+          toc: true
+          toc_float: true
+          number_sections: true
+          css: style.css
+---
+
+<center>
+Karol Doliński
+
+Informatyka i Ekonometria
+</center>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+ fig.width = 6,
+ fig.asp = 0.9,
+ out.width = "100%"
+)
+
+options(scipen=10000)
+
+library(fpp3)
+library(forecast)
+library(fabletools)
+library(kableExtra)
+library(tidyverse)
+
+set.seed(307005)
+```
+
+-----
+
+# Wprowadzenie
+
+Celem projektu jest wykorzystanie różnych metod do prognozowania wartości szeregu czasowego, a następnie ich porównanie w kontekście jakości uzyskanych prognoz zarówno na zbiorze uczącym jak i testowym. Praca zostanie rozpoczęta od analizy wybranego szeregu czasowego wraz z jego dekompozycją metodą STL. Następnie zaimplementowane zostaną metody naiwne, ETS oraz Holta-Wintersa wraz z wyznaczeniem prognoz. Kolejnym etapem pracy będzie estymacja modelu ARIMA, a całość zostanie uzupełniona o predykcję z wykorzystaniem sieci neuronowych i metody Theta. Ostatnim etapem będzie podsumowanie i porównanie wszystkich wykorzystanych metod. 
+
+-----
+
+# Opis zbioru danych
+
+Wybrany zbiór danych przedstawia handel detaliczny artykułami farmaceutycznymi, kosmetycznymi i toaletowymi w stanie Queensland w Australii od kwietnia 1982 roku do grudnia 2018 roku (ponad 36 lat). Dane pochodzą ze zbioru `aus_retail` z pakietu `tsibbledata`, który przedstawia obroty handlu detalicznego w Australii. 
+
+Charakterystyki szeregów czasowych często dokonuje się wykorzystując takie pojęcia jak trend, cykliczność i sezonowość. Trend to długoterminowy wzrost lub spadek danych, który nie zawsze jest liniowy. Sezonowość ma miejsce wtedy, gdy na szereg czasowy wpływają czynniki sezonowe (np. dzień tygodnia, pora roku). Należy podkreślić, iż sezonowość ma znany, ustalony okres. Z sezonowością często mylona jest cykliczność, natomiast jest to zupełnie inne zjawisko. O cykliczności można mówić wtedy, gdy występują wzrosty lub spadki w wartościach danych o nieustalonej częstotliwości (częstotliwość nie jest stała). Jest to spowodowane najczęściej warunkami ekonomicznymi, cyklami koniunkturalnymi. 
+
+Na wykresie przedstawiono kształtowanie się wartości wybranego szeregu czasowego. Można zauważyć trend, który jest rosnący. Na podstawie tylko tego jednego wykresu można też przypuszczać, że występuje sezonowość. 
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, out.width="70%", fig.align="center"}
+df_series <- as_tsibble(aus_retail) %>% 
+  filter(`Series ID` == sample(aus_retail$`Series ID`,1)) %>% 
+  select(Month, Turnover)
+
+df_series %>% autoplot(Turnover) + 
+  labs(title="Wykres szeregu czasowego", y="Obrót", x="Czas") +
+  theme_bw()
+```
+
+Poniżej przedstawiono dwa wykresy, które potwierdzają występowanie rosnącego trendu, ale również można mówić o sezonowości, pod koniec roku występuje ich znaczący wzrost, gdy np. w lutym obserwuje się spadek. Nie ma przesłanek mówiących o występowaniu cykliczności w badanym szeregu. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, out.width="50%"}
+df_series %>% gg_season(Turnover) + 
+  xlab("Czas") + 
+  ylab("Obrót") +
+  theme_bw()
+
+df_series %>% gg_subseries(Turnover) + 
+  xlab("Czas") + 
+  ylab("Obrót") 
+```
+Przed przystąpieniem do dalszej analizy należy ocenić wariancję badanego szeregu czasowego, a także sprawdzić stacjonarność. Na podstawie wykresu obrazującego wartości szeregu można stwierdzić, że wariancja nie jest stała, więc w konsekwencji szereg nie będzie stacjonarny. 
+
+Do przekształcenia szeregu można zastosować metodę Boxa-Coxa, która umożliwia wyznaczenie parametru $\lambda$, ze względu na tą wartość dokonuje się odpowiedniego przekształcenia -  możliwe jest między innymi logarytmowanie czy pierwiastkowanie zmiennych. Do wyznaczenia najlepszej wartości parametru $\lambda$ wykorzystano podejście zaproponowane przez V. M. Guerrero. Wyznaczona wartość parametru metodą Guerrero to: $\lambda = 0,157$. Oznacza to, że właściwą transformacją jest logarytmowanie lub pierwiastkowanie. Zdecydowano się zbadać również stacjonarność obu szeregów z wykorzystaniem rozszerzonego testu Dickeya-Fullera o hipotezach:<br/>
+$$H_0: Szereg~nie~jest~stacjonarny\\H_1: \sim H_0$$
+Wartość p-value była równa w przybliżeniu 0,01 dla spierwiastkowanego szeregu, a więc mniej niż przyjęty poziom istotności 0,05. Dlatego istnieją podstawy do odrzucenia hipotezy zerowej, co oznacza, iż badany szereg jest stacjonarny. Z kolei p-value dla szeregu zlogarytmowanego była równa około 0,32 - a więc szereg ten jest niestacjonarny. Z uwagi na to, zdecydowano się na użycie transformacji polegającej na spierwiastkowaniu wartości szeregu czasowego.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, out.width="50%"}
+df_series %>% autoplot(sqrt(Turnover)) + 
+  labs(title="Wykres spierwiastkowanego szeregu czasowego", y="Obrót", x="Czas") +
+  theme_bw()
+
+df_series %>% autoplot(log(Turnover))+ 
+  labs(title="Wykres zlogarytmowanego szeregu czasowego", y="Obrót", x="Czas") +
+  theme_bw()
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, out.width="50%"}
+df_series$Turnover <- sqrt(df_series$Turnover)
+```
+
+
+-----
+
+# Metoda STL
+
+STL (ang. _Seasonal and Trend decomposition using Loess_) to popularna i wszechstronna metoda dekompozycji szeregów czasowych. Cechuje ją kilka zalet w porównaniu z innymi metodami jak dekompozycja klasyczna czy X-11. Przede wszystkim składnik sezonowy może zmieniać się w czasie, a tempo zmian może być kontrolowane. Dodatkowo metoda radzi sobie z każdym rodzajem sezonowości, a nie tylko z danymi miesięcznymi i kwartalnymi. Korzystając z STL należy wybrać dwa główne parametry, tj. okno trendu i okno sezonowe. Parametry te służą do kontroli, jak szybko trend i komponenty sezonowe mogą się zmieniać. Im wartości są mniejsze, tym możliwe są szybsze zmiany. Oba parametry powinny być liczbami nieparzystymi. Okno trendu to liczba kolejnych obserwacji, które należy wykorzystać przy szacowaniu cyklu trendu, natomiast okno sezonowe to liczba kolejnych lat, które należy wykorzystać do oszacowania każdej wartości składnika sezonowego. Domyślnie okno sezonowe jest równe 13, a okno trendu 21 (dla danych miesięcznych). Funkcja STL dobiera odpowiednie parametry dla okna sezonowego i trendu, natomiast zweryfikowano też inne (niż te automatyczne) konfiguracje. Sprawdzono kilkadziesiąt kombinacji i wybrano okno sezonowe równe 5, a trendu równe 9. Zaproponowane parametry pozwalały na uzyskanie dobrze wygładzonych danych. Warto zaznaczyć, iż sama wizualizacja szeregu pozwala na wstępne określenie sezonowości i trendu. Dodatkowo dla wybranych parametrów składnik resztowy był stacjonarny i wykazywał najmniejszą autokorelację. Dekompozycja umożliwiła wyznaczenie trendu, który jest dosyć liniowy i rosnący. Widoczna jest również roczna sezonowość danych.
+
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, out.width="70%", fig.align="center"}
+df_series %>%  model(STL(Turnover ~ trend(window = 9) + season(window = 5), robust = TRUE)) %>%
+  components() %>%  autoplot() +
+  labs(title = "Dekompozycja STL", x = "Czas", subtitle = NULL)
+```
+
+-----
+
+# Metody benchmarkingowe
+
+Wykorzystywany szereg czasowy podzielono na część uczącą (dane sprzed 2011 roku) i testową. Następnie stworzono cztery modele metodami benchmarkingowymi, które następnie wykorzystano do stworzenia prognozy. Zdecydowano się na użycie metod:
+
++ ETS - wygładzanie wykładnicze (ang. _exponential smoothing_),
++ Drift,
++ Naive,
++ SNaive.
+
+Już na podstawie wykresu można by wskazać metodę ETS jako najlepszą spośród wybranych czterech. Dla zbioru uczącego błąd MAPE wyniósł około 1%, a dla zbioru testowego było to niecałe 1%. Prognozę, która osiąga tak niski błąd można uznać za wręcz znakomitą. Wartości błędów dla pozostałych trzech metod również nie są wysokie dla zbioru uczącego, natomiast znacząco się zwiększają dla zbioru testowego. Metoda SNaive osiąga wartość ponad 8% dla MAPE, co nie jest wartością złą, ale nieporównywalnie gorszą niż błąd dla metody ETS. Metody naiwne ciężko uznać za skuteczne. 
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+df_train <- df_series %>% filter(year(Month) < 2011)
+df_test <- df_series %>% filter(year(Month) >= 2011)
+
+model_train <- df_train %>% model(Drift = RW(Turnover ~ drift()),
+                                  ETS = ETS(Turnover),
+                                  NAIVE = NAIVE(Turnover),
+                                  SNAIVE = SNAIVE(Turnover))
+
+fc <- model_train %>% fabletools::forecast(h = nrow(df_test))
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, out.width="50%"}
+fc %>% autoplot(df_series, level = NULL) +
+  labs(x="Czas", y = "Obrót", title = "Prognoza") +
+  guides(colour = guide_legend(title = "Metoda"))
+
+fc %>% autoplot(df_series %>% filter(year(Month) >= 2011), level = NULL) +
+  labs(x="Czas", y = "Obrót", title = "Prognoza w powiększeniu") +
+  guides(colour = guide_legend(title = "Metoda"))
+
+fabletools::accuracy(model_train)[,c(1,3:7)] %>% kbl(digits = 3) %>% kable_styling() %>%
+  footnote(general = "Tab. 1.: Wartości błędów dla zbioru uczącego",
+           general_title = "",
+           footnote_as_chunk = T, title_format = c("italic"))
+
+fabletools::accuracy(fc, df_test)[,c(1,3:7)] %>% kbl(digits = 3) %>% kable_styling() %>%
+  footnote(general = "Tab. 2.: Wartości błędów dla zbioru testowego",
+           general_title = "",
+           footnote_as_chunk = T, title_format = c("italic"))
+```
+
+Analiza reszt dla modelu ETS wskazuje, iż nie jest to biały szum. Widoczna jest autokorelacja dla niektórych opóźnień. Natomiast test Shapiro-Wilka wskazuje, że reszty mają rozkład normalny (p-value jest równe około 0,08, a więc więcej niż przyjęty 5% poziom istotności). 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, out.width="70%", fig.align="center"}
+df_train %>% model(ETS(Turnover)) %>%
+  gg_tsresiduals() + ggtitle("Reszty - metoda ETS") 
+```
+
+-----
+
+# Metoda Holta-Wintersa
+
+Modele Holta-Wintersa są często wykorzystywane w prognozowaniu zmiennych z wahaniami sezonowymi. Wyróżnia się dwie postacie modelu: addytywną i multiplikatywną. Ponadto można utworzyć modele z wygaszonym trendem. W badaniu zdecydowano się wykorzystać postać multiplikatywną i multiplikatywną z wygaszonym trendem oraz ocenić jakość uzyskanych prognoz.
+
+Obie metody cechuje bardzo duża skuteczność prognozy dla zbioru uczącego, błąd MAPE jest równy około 1%. Natomiast dla próbki testowej błąd ten zwiększa się do 3%. Można zauważyć, iż metoda Holta-Wintersa z wygaszonym trendem prognozowała niższe wartości - w stosunku do tych prawdziwych. Większy błąd RMSE dla zbioru testowego został wyznaczony dla metoda Holta-Wintersa z wygaszonym trendem, chociaż różnica ta nie jest duża. W badanym szeregu trend jest silnie widoczny przez cały badany okres, w związku z tym jego wygaszanie niekoniecznie jest właściwą drogą. Dodatkowo prognozy uzyskane tymi metodami są znacznie dokładniejsze, niż te uzyskane metodą _Naive_ i _SNaive_.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+model_HW = df_train %>% model(
+    HW = ETS(Turnover ~ error("M") + trend("M") + season("M")),
+    HW_damped = ETS(Turnover ~ error("M") + trend("Md") + season("M")))
+
+fc_HW <- model_HW %>% fabletools::forecast(h=nrow(df_test)) 
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, out.width="50%"}
+fc_HW %>%
+  autoplot(df_series, level = NULL) +
+  labs(x="Czas", y = "Obrót", title = "Prognoza") +
+  guides(colour = guide_legend(title = "Metoda"))
+
+fc_HW %>%
+  autoplot(df_series %>% filter(year(Month) >= 2011), level = NULL) +
+  labs(x="Czas", y = "Obrót", title = "Prognoza w powiększeniu") +
+  guides(colour = guide_legend(title = "Metoda"))
+
+fabletools::accuracy(model_HW)[,c(1,3:7)] %>% kbl(digits = 3) %>% kable_styling() %>%
+  footnote(general = "Tab. 3.: Wartości błędów dla zbioru uczącego",
+           general_title = "",
+           footnote_as_chunk = T, title_format = c("italic"))
+fabletools::accuracy(fc_HW, df_test)[,c(1,3:7)] %>% kbl(digits = 3) %>% kable_styling() %>%
+  footnote(general = "Tab. 4.: Wartości błędów dla zbioru testowego",
+           general_title = "",
+           footnote_as_chunk = T, title_format = c("italic"))
+```
+
+Analiza reszt dla modelu Holta-Wintersa wskazuje, iż nie jest to biały szum. Widoczna jest autokorelacja. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, out.width="70%", fig.align="center"}
+df_train %>% model(ETS(Turnover ~ error("M") + trend("M") + season("M"))) %>%
+  gg_tsresiduals() + ggtitle("Reszty - metoda HW")
+```
+
+Kolejnym etapem badania była próba poprawienia uzyskanych prognoz poprzez zastosowanie dekompozycji STL do danych przekształconych metodą Boxa-Coxa, a następnie wykorzystania danych skorygowanych sezonowo do stworzenia modelu ETS. 
+
+W tak utworzonym modelu uzyskana prognoza dla zbioru uczącego wyniosła około 0,88% (MAPE), co stanowi do tej pory najniższy uzyskany błąd. Natomiast MAPE dla zbioru testowego wyniósł prawie 4% - o wiele lepszą prognozę uzyskano bez wykorzystania danych wyrównanych sezonowo.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+df_train_ts <- ts(df_train$Turnover, start = c(1982,4), frequency = 12)
+df_test_ts <- ts(df_test$Turnover, start = c(2011,1), frequency = 12)
+
+fc_stl_ets_train <- df_train_ts %>%
+  stlm(s.window = 13, robust = TRUE, method = "ets", lambda = BoxCox.lambda(df_train_ts)) %>%
+  forecast(h = nrow(df_test), lambda = BoxCox.lambda(df_train_ts))
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, out.width="50%", fig.align="center"}
+autoplot(fc_stl_ets_train, level=NULL) +
+  labs(x="Czas", y = "Obrót", title = "Prognoza")
+forecast::accuracy(fc_stl_ets_train, df_test_ts)[,c(1:6)] %>% kbl(digits = 3) %>% kable_styling() %>%
+  footnote(general = "Tab. 5.: Wartości błędów dla zbioru uczącego i testowego",
+           general_title = "",
+           footnote_as_chunk = T, title_format = c("italic"))
+```
+
+-----
+
+# ARIMA
+
+Podstawowym a zarazem efektywnym narzędziem do modelowania oraz prognozowania szeregów czasowych są – w przypadku szeregów stacjonarnych – modele $ARMA$ oraz – w przypadku szeregów niestacjonarnych – modele $ARIMA$. 
+Modele $ARMA$ posiadają dwa parametry $p$ i $q$, gdzie $p$ jest rzędem autoregresji, a $q$ rzędem średniej ruchomej. Dla procesu $X_t$ model ten wyraża się wzorem:
+
+$$X_t=\phi_0+\phi_1X_{t-1}+\phi_2X_{t-2}+...+\phi_pX_{t-p}+\varepsilon_t+
+\theta_1\varepsilon_{t-1}+\theta_2\varepsilon_{t-2}+...+\theta_q\varepsilon_{t-q}$$
+
+gdzie $\varepsilon_t$ to proces resztowy (biały szum). <br>
+
+W modelach $ARIMA(p,d,q)$ kluczową rolą jest zbadanie stopnia integracji ($d$). W przypadku wykazania stacjonarności szeregu parametr $d$ ma wartość 0, a sam szereg nie wymaga przekształceń. W sytuacji odwrotnej należy zmodyfikować go i sprowadzić do stacjonarności uzyskując jednocześnie wartość stopnia integracji. W badaniu dobór parametrów do modelu został wykonany automatycznie. W przypadku uwzględnienia sezonowości w modelu występują nie trzy, a sześć parametrów (dodatkowe trzy dotyczą sezonowości).
+
+Prognozę uzyskaną dla modelu $ARIMA(1,1,1)(2,1,2)_{12}$ dla zbioru uczącego można uznać za znakomitą, wartości błędów są niskie, MAPE to około 0,8%. Dla zbioru testowego wartości te są trochę wyższe, MAPE wyniósł około 1,7%, natomiast prognozę wciąż można uznać za bardzo dobrą. Można zauważyć, że model raczej przeszacowywał niż nie doszacowywał wartości. Prognozy były zazwyczaj większe, niż wartości rzeczywiste, natomiast sezonowość została bardzo dobrze uchwycona. 
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+model_ARIMA <- df_train %>% model(ARIMA = ARIMA(Turnover))
+
+fc_ARIMA <- model_ARIMA %>%
+  fabletools::forecast(h = nrow(df_test))
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, out.width="50%"}
+fc_ARIMA %>%
+  autoplot(df_series, level = NULL) +
+  labs(x="Czas", y = "Obrót", title = "Prognoza") +
+  guides(colour = guide_legend(title = "Metoda"))
+
+fc_ARIMA %>%
+  autoplot(df_series %>% filter(year(Month) >= 2011), level = NULL) +
+  labs(x="Czas", y = "Obrót", title = "Prognoza w powiększeniu") +
+  guides(colour = guide_legend(title = "Metoda"))
+
+fabletools::accuracy(model_ARIMA)[,c(1,3:7)] %>% kbl(digits = 3) %>% kable_styling() %>%
+  footnote(general = "Tab. 6.: Wartości błędów dla zbioru uczącego",
+           general_title = "",
+           footnote_as_chunk = T, title_format = c("italic"))
+
+fabletools::accuracy(fc_ARIMA, df_test)[,c(1,3:7)] %>% kbl(digits = 3) %>% kable_styling() %>%
+  footnote(general = "Tab. 7.: Wartości błędów dla zbioru testowego",
+           general_title = "",
+           footnote_as_chunk = T, title_format = c("italic"))
+
+```
+
+Wykorzystane do budowy modelu $ARIMA(1,1,1)(2,1,2)_{12}$ dane były stacjonarne, ponadto reszty wykazują białoszumowość, liczba istotnych autokorelacji jest niewielka. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, out.width="70%", fig.align="center"}
+df_train %>% model(ARIMA(Turnover)) %>%
+  gg_tsresiduals() + ggtitle("Reszty - ARIMA") 
+```
+
+-----
+
+# Sieci neuronowe i Theta
+
+Ostatnimi dwiema wykorzystanymi metoda w badaniu była metoda Theta oraz sztuczne sieci neuronowe dla szeregów czasowych. Sieci neuronowe są narzędziem bardziej złożonym, a obliczanie na ich podstawie prognozy jest bardziej złożone czasowo. Niemniej potrafią być dokładniejsze i lepiej odzwierciedlać nieliniowe zależności. 
+
+Obie wykorzystane metody dały podobne wartości błędu MAPE dla zbioru uczącego, było to około 1,1%. Prognoza z wykorzystaniem sieci neuronowej dla zbioru testowego cechowała się MAPE na poziomie 2%, a metoda Theta – 3,5%. Prognozy można uznać za bardzo dobre, ale warto zauważyć, iż prognoza z wykorzystaniem sieci neuronowych była o wiele bliższa wartościom prawdziwym na początku prognozy, pod koniec różnice zaczynają być bardziej zauważalne.  
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+model_THETA_NNETAR <- df_train %>% 
+  model(NNETAR = NNETAR(Turnover),
+        THETA = THETA(Turnover))
+
+fc_THETA_NNETAR <- model_THETA_NNETAR %>%
+  fabletools::forecast(h = nrow(df_test))
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, out.width="50%"}
+fc_THETA_NNETAR %>%
+  autoplot(df_series %>% filter(year(Month) >= 2011), level = NULL) +
+  labs(x="Czas", y = "Obrót", title = "Prognoza") +
+  guides(colour = guide_legend(title = "Metoda"))
+
+fc_THETA_NNETAR %>%
+  autoplot(df_series, level = NULL) +
+  labs(x="Czas", y = "Obrót", title = "Prognoza") +
+  guides(colour = guide_legend(title = "Metoda"))
+
+fabletools::accuracy(model_THETA_NNETAR)[,c(1,3:7)] %>% kbl(digits = 3) %>% kable_styling() %>%
+  footnote(general = "Tab. 8.: Wartości błędów dla zbioru uczącego",
+           general_title = "",
+           footnote_as_chunk = T, title_format = c("italic"))
+
+fabletools::accuracy(fc_THETA_NNETAR, df_test)[,c(1,3:7)] %>% kbl(digits = 3) %>% kable_styling() %>%
+  footnote(general = "Tab. 9.: Wartości błędów dla zbioru testowego",
+           general_title = "",
+           footnote_as_chunk = T, title_format = c("italic"))
+```
+
+-----
+
+# Podsumowanie
+
+Zaproponowane metody do prognozy wartości wybranego szeregu czasowego okazały się bardzo dobre w swoich predykcjach. Należy podkreślić, iż w badanym szeregu czasowym widoczny jest rosnący trend i roczna sezonowość. Nie udało się wykazać występowania cykliczności. Najlepsze prognozy dla zbioru uczącego osiągnięto z wykorzystaniem modelu _ARIMA_, błąd MAPE wyniósł 0,8%. Warto podkreślić niskie wartości tego błędu dla wszystkich wybranych metod za wyjątkiem metod: _Drift_, _Naive_ i _SNaive_. Natomiast oceniając prognozy uzyskane na próbce testowej najlepsze wyniki osiągnęły metody: _ETS_, _ARIMA_ i sieci neuronowe z błędem MAPE równym odpowiednio: 1%, 1,8%, 2%. Są to wyniki pozwalające określić uzyskaną predykcję jako bardzo dobrą. Można stwierdzić, iż są to modele, które w sposób bardzo dobry potrafiły przewidzieć przyszłe wartości szeregu czasowego, nawet te odległe o kilka lat w stosunku do ostatniej obserwacji zbioru uczącego. 
+
+
+-----
+
+
+
+
+
+
+
+
+
+
+
+
+
